@@ -1,0 +1,74 @@
+<xsl:stylesheet version="1.0"  xmlns:xsl="http://www.w3.org/1999/XSL/Transform" 
+ xmlns:dp="http://www.datapower.com/extensions"  
+ xmlns:dpfunc="http://www.datapower.com/extensions/functions" 
+ xmlns:dpconfig="http://www.datapower.com/param/config" 
+ exclude-result-prefixes="dp dpconfig dpfunc" 
+ extension-element-prefixes="dp">  
+	<xsl:output method="xml" version="1.0" encoding="utf-8" omit-xml-declaration="no" indent="no" />
+	<!-- Author:ar31670. APIM B2B channel typically has 2 MPGs.Handler MPG fronted by Router MPG. Router MPG will create a header X509ClientIdentity ,value is the SSL Certficate of the client from the Connection.		  This Stylesheet will be used in AAA of Handler MPG to read the header and authenticate using Validation Credential.   -->
+	<xsl:param name="dpconfig:x509clientheader-name" select="'X509ClientIdentity'" />
+	<dp:param name="dpconfig:x509clientheader-name" type="dmString" xmlns="">
+		<display>HTTP Header Name</display>
+		<default>X509ClientIdentity</default>
+		<description>Name of HTTP header field that contains the SSL X.509 client cerificate key.</description>
+	</dp:param>
+	<xsl:param name="dpconfig:valcred" select="'aggregators-b2b'"/>
+	<dp:param name="dpconfig:valcred" type="dmReference" reftype="CryptoValCred" xmlns="">
+		<display>Validation Credential</display>
+		<description>The Validation Credential to use for authenticating the user's certificate.</description>
+     <default>aggregators-b2b</default>
+
+
+	</dp:param>
+	<xsl:template match="/">
+		<xsl:variable name="x509clientidentity-header" select="dp:http-request-header($dpconfig:x509clientheader-name)"/>
+		<xsl:variable name="valcred" select="$dpconfig:valcred"/>
+		<xsl:message dp:priority="debug">x509clientidentity-header: <xsl:value-of select="$x509clientidentity-header"/>
+		</xsl:message>
+		<xsl:message dp:priority="debug">valcred: <xsl:value-of select="$valcred"/>
+		</xsl:message>
+		<xsl:choose>
+			<xsl:when test="not($valcred)">
+				<dp:reject>
+					<xsl:value-of select="'No Certificate Validation Credential has been defined in Policy Stylesheet Parameters or Process Rule Advanced Configuration.'"/>
+				</dp:reject>
+			</xsl:when>
+			<xsl:otherwise>
+				<xsl:variable name="input">
+					<input>
+						<xsl:choose>
+							<xsl:when test="$x509clientidentity-header">
+								<subject>
+									<xsl:value-of select="concat('cert:',$x509clientidentity-header)"/>
+								</subject>
+							</xsl:when>
+							<xsl:otherwise>
+								<!--<subject><xsl:value-of select="concat('cert:',$sslclientidentity)"/></subject><dp:append-request-header name="$dpconfig:x509clientheader-name" value="$sslclientidentity"/>-->
+							</xsl:otherwise>
+						</xsl:choose>
+					</input>
+					</xsl:variable>
+					<xsl:variable name="output">
+						<xsl:copy-of select="dp:validate-certificate($input,$valcred)" />
+					</xsl:variable>
+					<xsl:choose>
+						<xsl:when test="$output/error">
+							<xsl:message dp:priority="debug">
+								<xsl:copy-of select="$output"/>
+							</xsl:message>
+							<dp:reject>
+								<xsl:value-of select="$output/error"/>
+							</dp:reject>
+						</xsl:when>
+						<xsl:otherwise>
+							<xsl:copy-of select="." />
+						</xsl:otherwise>
+					</xsl:choose>
+				</xsl:otherwise>
+			</xsl:choose>
+			<dp:remove-http-request-header name="$dpconfig:x509clientheader-name"/>
+		</xsl:template>
+	</xsl:stylesheet>
+	
+	
+	
