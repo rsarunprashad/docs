@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
+    xmlns:dp="http://www.datapower.com/extensions"
+    extension-element-prefixes="dp" exclude-result-prefixes="dp">
+
+    <xsl:template match="/">
+        <dp:set-http-request-header name="'ssgtype'" value="dp:http-request-header('Content-Type')"/>
+	<xsl:variable name="x509clientidentity" select="dp:http-request-header('X509ClientIdentity')"/>
+	<xsl:variable name="sslclientidentity" select="dp:auth-info('ssl-client-cert')"/>
+
+	<xsl:message dp:priority="debug"><xsl:value-of select="$x509clientidentity"/></xsl:message>
+	<xsl:message dp:priority="debug"><xsl:value-of select="$sslclientidentity"/></xsl:message>
+
+	<xsl:if test="not($x509clientidentity)">
+		<dp:append-request-header name="'X509ClientIdentity'" value="$sslclientidentity"/>
+	</xsl:if>
+
+        <xsl:copy>
+        	<xsl:apply-templates/>
+        </xsl:copy>
+
+    </xsl:template>        
+
+    <xsl:template match="@*|node()">
+        <xsl:copy>
+            <xsl:apply-templates select="@*|node()"/>
+        </xsl:copy>
+    </xsl:template>
+
+</xsl:stylesheet>
