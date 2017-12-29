@@ -1,0 +1,256 @@
+import flask
+from flask import Flask, jsonify, request, json, Response
+import os
+import yaml
+import re
+import logging
+from logging.handlers import RotatingFileHandler
+import base64
+from versionvalidator import APIDraftVersionValidator
+from createYamls import YamlCreater
+
+
+app = Flask(__name__)
+
+UPLOAD_FOLDER = '/uploads'
+ALLOWED_EXTENSIONS = set(['yaml'])
+
+
+class RequestHandler :
+        def __init__(self):
+             self._apis=set()
+             self._products=set()
+			 
+@app.route('/createYamls', methods = ['POST'])
+        def createEnvYamlFiles():
+                rh=YamlCreater()
+                pyld=None
+                statusCd=None
+                if 'apiFile' not in flask.request.files or 'propsFile' not in flask.request.files:
+                                data = {'status':'Failure','error'  : 'No Files.'}
+                                pyld = json.dumps(data)
+                                return  Response(pyld, 400)
+                errs={}
+                logger.info('Inside createEnvYamlFiles')
+                apiFiles=flask.request.files.getlist("apiFile")
+
+                #Save and Load Props File into Obj
+                propsFile=flask.request.files.getlist("propsFile")[0]
+                propsFilePath=rh.storeFile(propsFile,rh.dirnamercvd)  
+                propsFileDict=rh.getDeploymentPropsMap(propsFilePath)
+
+                for file in apiFiles:   
+                        file_errors=[]
+                        logger.info("createEnvYamlFiles file recieved:"+file.filename)
+                        if file and not rh.allowed_file(file.filename):
+                                logger.error("Invalid API Yaml File Extn:"+file.filename)
+                                errs[file.filename]='File Extension InValid'
+                        elif file and rh.allowed_file(file.filename):
+                        #       Store API File
+                                tplFilePath=rh.storeFile(file,rh.dirnamercvd)
+                                #Load API into YamlO
+                                with open(tplFilePath, 'r') as ymlof:
+                                        ymlo = yaml.load(ymlof)
+                                #logger.info('ymlo loaded-->'+str(ymlo))
+                                #For Each Env, Update Props Value and Save as new File
+                                envs='SIT,UAT,PROD'
+                                for env in envs.split(','):
+                                                envAPIPropKey='apiproperties~'+file.filename.split('.yaml')[0]+'~'+env
+                                                logger.info('Checking Prop Key '+envAPIPropKey+' in Props File:'+propsFile.filename)
+                                                if envAPIPropKey in propsFileDict :
+                                                        logger.info(envAPIPropKey +'found in file'+propsFile.filename+' with value:'+propsFileDict[envAPIPropKey])
+                                                        envPropsJSON=json.loads(propsFileDict[envAPIPropKey])
+                                                        logger.info('envPropsJSON:'+str(envPropsJSON))
+                                                        for prop in envPropsJSON:
+                                                                logger.info(str(prop) + ' value for env'+env+' for API File '+ file.filename+' is '+str(envPropsJSON[prop]))
+                                                                logger.info('from tpl yamlo'+str( ymlo['x-ibm-configuration'] ))
+                                                                if prop not in ymlo['x-ibm-configuration']['properties']:
+                                                                        file_errors.append(str(prop)+'not defined in Yaml File'+file.filename)
+                                                                else:
+                                                                        propVal=envPropsJSON[prop]
+                                                                        #logger.info('PROPS..-->'+str( ymlo['x-ibm-configuration']['properties'][prop]))
+                                                                        ymlo['x-ibm-configuration']['properties'][prop]['value']=str(propVal)
+                                                envAPIYamlFile=rh.dirnamecreated+file.filename+'_'+env+'.yaml'
+                                                with open(envAPIYamlFile, 'w') as fenvAPIYamlFile:
+                                                        yaml.dump(ymlo, fenvAPIYamlFile,default_style='"')
+
+                                if len(file_errors) > 0:
+                                                errs[file.filename]=file_errors
+
+                if len(errs) > 0:
+                        data = {'status':'Failure','error'  : str(errs)}
+						pyld = json.dumps(data)
+						return  Response(pyld, 400)
+                else :
+                        created=rh.createZipFile()
+
+                        return send_file(rh.fZip,
+                                mimetype = 'application/zip',
+                                attachment_filename= 'Yamls.zip',
+                                as_attachment = True)
+			 
+
+
+
+@app.route('/validateYaml', methods = ['POST'])
+def validateFilesAPI():
+        rh=RequestHandler()
+        pyld=None
+        statusCd=None
+        if 'file' not in flask.request.files:
+                data = {'status':'Failure','error'  : 'No Files.'}
+                pyld = json.dumps(data)
+                return  Response(pyld, 400)
+        errs={}
+        logger.info('Inside validateFilesAPI')
+        files=flask.request.files.getlist("file")
+        for file in files:
+            
+            logger.info("validatiing file:"+file.filename)
+            if file and not allowed_file(file.filename):
+                logger.error("Invalid File Extn:"+file.filename)
+                errs[file.filename]='File Extension InValid'
+            elif file and allowed_file(file.filename):
+                file_errors=handle_file(file,request,rh)
+                logger.info('back from handle_file'+str(file_errors))
+                if len(file_errors) > 0:
+                        errs[file.filename]=file_errors
+        errs_version=validateVersions(rh)
+        if len( errs_version ) > 0:
+         errs['version_conflict']=errs_version
+
+        if len(errs) > 0:
+                logger.error("validation errors"+str(errs))
+                errs['status']='Failure'
+                pyld = json.dumps(errs)
+                return  Response(pyld, 400)
+        else:
+                logger.info("no validation errors"+str(errs))
+                data = {'status':'OK'}
+                pyld = json.dumps(data)
+                return  Response(pyld, 200)
+            
+
+def validateVersions(rh):
+        versionValObj=APIDraftVersionValidator()
+        return versionValObj.valVersion(rh._products,rh._apis)
+
+def handle_file(file, request,rh):
+        
+        cwd, cfn = os.path.split(os.getcwd())
+        uploads_dir=cwd+UPLOAD_FOLDER
+        logger.info('creating dir'+os.path.realpath(uploads_dir))
+        if not os.path.exists(uploads_dir):
+           os.makedirs(uploads_dir)
+        filePath=os.path.join(uploads_dir, file.filename)
+        file.save(filePath)
+        errs=[]
+        with open(filePath, 'r') as f:
+                try:
+                   ymlo = yaml.load(f) 
+                   err_str=updateFilesList(ymlo,rh)
+                   if err_str is not None:
+                        errs.append(err_str)
+                   if ('x-ibm-configuration' in ymlo)  and 'assembly' in ymlo['x-ibm-configuration']:
+                         assembly=ymlo['x-ibm-configuration']['assembly']
+                         #print('assembly'+json.dumps(assembly))
+                         val_errs=[]
+                         val_errs=validateAssembly(assembly,val_errs)
+                         if len(val_errs) > 0:
+                                errs.extend(val_errs)
+                                logger.info('assembly val errors'+str(val_errs))
+                                val_errs=[]
+                                return errs
+                   
+                except yaml.YAMLError as exc:
+                        os.remove(filePath)
+                        logger.error("error loading yaml file :"+file.filename+"Error:"+str(exc))
+                        errs.append('Invalid yaml file')
+                        logger.info('return errr for invaid yaml')
+                        return  errs
+                patterns_notallowed=request.form.get('patterns_notallowed')                             
+                
+                if patterns_notallowed != None and patterns_notallowed != "" :
+                        logger.info('checking for patterns if any:'+patterns_notallowed)
+                        for pat_notallowedB64 in patterns_notallowed.split(','):
+                                pat_notallowed=base64.b64decode(pat_notallowedB64)
+                                logger.info('matching  pattern :'+pat_notallowed)
+                                pat=re.compile(pat_notallowed, re.IGNORECASE)
+                                for line in f:
+                                        if line != None and line != '':
+                                                m_word = pat.findall(line)
+                                                if m_word :
+                                                        errs.extend(m_word)
+        logger.info("No of Pattern match"+str(len(errs)))
+        logger.info("closing file"+file.filename)
+        f.close()
+        #os.remove(filePath)
+
+        return errs
+
+def updateFilesList(yamlo,rh):
+        if ('product' in yamlo ) or ('swagger' in yamlo):
+                 
+                if 'product' in yamlo :
+                        prod_name_version=yamlo['info']['name'] +':'+yamlo['info']['version']
+                        rh._products.add(prod_name_version)
+                else :
+                        api_name_version=yamlo['info']['x-ibm-name'] +':'+yamlo['info']['version']
+                        rh._apis.add(api_name_version)
+                return None
+        else:
+                return "Invalid Yaml"
+
+def validateAssembly(obj,val_errs):
+
+        if isinstance(obj, dict) and ('invoke' in obj.keys() or 'proxy' in obj.keys() ):
+                print('Inside invoke or proxy:'+json.dumps(obj))
+                for k, v in obj.iteritems():
+                        timeout=v['timeout']
+                if timeout > 120:
+                        val_errs.append('timeout invalid:'+timeout)
+                if 'username' in v:
+                        user=v['username']
+                        if not (user.strip().startswith('$(') and user.strip().endswith(')') ):
+                                val_errs.append('username must be property:'+user.strip())
+                if 'password' in v:
+                        pwd=v['password']
+                        if not ( pwd.strip().startswith('$(') and pwd.strip().endswith(')') ):
+                                val_errs.append('pwd must be property')
+                url=v['target-url']
+                if not ( url.strip().startswith('$(') and ')' in url ):
+                        val_errs.append('target_url must be property:'+url.strip())
+
+        elif isinstance(obj, dict):
+                for k,v in obj.iteritems():
+                        validateAssembly(v,val_errs)
+
+        elif isinstance(obj, list) :
+                for i in obj :
+                        validateAssembly(i,val_errs)
+
+        return val_errs
+
+
+def allowed_file(filename):
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1] in ALLOWED_EXTENSIONS
+
+
+@app.errorhandler(404)
+def not_found(error=None):
+    data = {'status': 404,'message': 'URL not Found for this App. ' + request.url}
+    pyld = json.dumps(data)
+    return  Response(pyld, 404)
+    
+
+
+if __name__ == '__main__':
+    handler = RotatingFileHandler('foo.log', maxBytes=10000, backupCount=1)
+    handler.setLevel(logging.INFO)
+ 
+    logger = logging.getLogger('__name__')
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+     
+    app.run(host='0.0.0.0')
